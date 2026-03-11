@@ -3,7 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include <ESP32Servo.h>
 
-// TODO: #include the motor control code (leviosa module)
+// TODO: Define LEVIOSA_LED_PIN (or LED strip pin) for the leviosa levitation effect
 // TODO: Define LUMOS_LED_PIN (or LED strip pin) for the lumos light effect
 
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
