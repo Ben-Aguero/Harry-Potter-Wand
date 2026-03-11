@@ -203,6 +203,8 @@ void processFFT(float fft_return[2]) {
 }
 
 void process_hit() {
+  /////////////////////////////Check for which target got hit////////////////////////////////
+  
   // Play other song
   myDFPlayer.advertise(1);
 
@@ -237,8 +239,8 @@ static void hitProcessCallback(TimerHandle_t xTimer) {
   hit_state = WAITING;
 }
 
-// TODO: Add lumosProcessCallback
-// TODO: Add leviosaProcessCallback
+// TODO: Add lumosProcessCallback - Ben has code to implement the motor functionality
+// TODO: Add leviosaProcessCallback - Turn on for x amount of time, then turn off.
 
 // Init the Timer
 int32_t hitProcessTimer_init(void) {
