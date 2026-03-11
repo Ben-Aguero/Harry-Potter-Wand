@@ -3,7 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include <ESP32Servo.h>
 
-// TODO: #include the motor control code (leviosa module)
+// TODO: Define LEVIOSA_LED_PIN (or LED strip pin) for the leviosa levitation effect
 // TODO: Define LUMOS_LED_PIN (or LED strip pin) for the lumos light effect
 
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
@@ -42,14 +42,8 @@ float volatile threshold = 750;
 typedef enum { WAITING,
                PROCESSING } hit_state_e;
 hit_state_e hit_state = WAITING;
-
-// TODO: Add a hit_state for leviosa independently of other states
-//       so spells can coexist without blocking each other
-//       e.g. hit_state_e leviosa_state = WAITING;
-
-// TODO: Add a hit_state for lumos independently of other states
-//       so spells can coexist without blocking each other
-//       e.g. hit_state_e lumos_state = WAITING;
+hit_state_e leviosa_state = WAITING;
+hit_state_e lumos_state = WAITING;
 
 Servo myservo;  // create servo object to control a servo
 int pos = INITIAL_POSITION;    // Servo location
