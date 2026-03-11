@@ -42,14 +42,8 @@ float volatile threshold = 750;
 typedef enum { WAITING,
                PROCESSING } hit_state_e;
 hit_state_e hit_state = WAITING;
-
-// TODO: Add a hit_state for leviosa independently of other states
-//       so spells can coexist without blocking each other
-//       e.g. hit_state_e leviosa_state = WAITING;
-
-// TODO: Add a hit_state for lumos independently of other states
-//       so spells can coexist without blocking each other
-//       e.g. hit_state_e lumos_state = WAITING;
+hit_state_e leviosa_state = WAITING;
+hit_state_e lumos_state = WAITING;
 
 Servo myservo;  // create servo object to control a servo
 int pos = INITIAL_POSITION;    // Servo location
