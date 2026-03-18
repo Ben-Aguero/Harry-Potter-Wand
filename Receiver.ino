@@ -12,21 +12,25 @@
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
 #define FFT_N 1024              // FFT Size
-#define ADC_PIN 15              // Change to your ADC pin
 #define TARGET_FREQ 4000.0      // Frequency of wand signal
 #define HIT_PROCESS_TIMER 5000  // Time before another hit can be detected after hit
+#define LUMOS_PROCESS_TIMER 5000 // Time before an additional lumos hit can be processed
 #define LED_PIN 14            // Debugging LED
-#define HIT_LED 12            // LEDs on bug guy
 #define VOLUME_PIN 34         // Pin for volume potentiometer (Left pot)
 #define THRESHOLD_PIN 35      // Pin for the threshold potentiometer (Right pot)
-#define INITIAL_POSITION 85   // Starting position for the servo in degrees
-#define FINAL_POSITION 175    // Hit position for the servo in degrees
 #define MAX_ADC 4095          // Max adc value from the esp analog adc
 #define MAX_VOLUME 30         // Max volume value
 #define MAX_THRESHOLD 20000   // Max possible threshold 
 #define MIN_THRESHOLD 100     // Min possible threshold
 
-/////////////// Leviosa /////////////////////
+///////////////////// Pixie /////////////////////
+#define ADC_PIN 15              // Pin for Pixie detection ADC
+#define HIT_LED 12            // Pin for Pixie LEDs
+#define PIXIE_SERVO_CONTROL_PIN 13    // Pin for Pixie servo control
+#define INITIAL_POSITION 85   // Starting position for pixie servo in degrees
+#define FINAL_POSITION 175    // Hit position for pixie servo in degrees
+
+///////////////////// Leviosa /////////////////////
 #define ADC_PIN_LEVIOSA 36  // Second wand ADC for leviosa detection (adjust as needed)
 #define ENA_PIN         25
 #define IN1_PIN         26
@@ -35,6 +39,11 @@
 #define ENCODER_B       33     // Can change any of these
 #define PWM_FREQ       30000
 #define PWM_RESOLUTION 8
+
+///////////////////// Lumos /////////////////////
+#define ADC_PIN_LUMOS 37
+#define LUMOS_MOSFET_CONTROL_PIN 23 
+
 
 // PI tuning
 const float Kp = 2.0f;
@@ -64,6 +73,11 @@ float fft_input_leviosa[FFT_N];
 float fft_output_leviosa[FFT_N];
 int   sampleIndex_leviosa = 0;
 static TaskHandle_t leviosaTaskHandle = NULL;
+
+// Lumos FFT buffers
+float fft_input_lumos[FFT_N];
+float fft_output_lumos[FFT_N];
+int sampleIndex_lumos = 0;
 
 // Motor helpers
 void motorStop() {
@@ -280,7 +294,7 @@ hit_state_e lumos_state = WAITING;
 
 Servo myservo;  // create servo object to control a servo
 int pos = INITIAL_POSITION;    // Servo location
-int servoPin = 13;
+int servoPin = PIXIE_SERVO_CONTROL_PIN;
 
 void setup() {
   // Initialize LEDs
@@ -301,7 +315,8 @@ void setup() {
   pinMode(ENCODER_B, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ENCODER_A), encoderISR, RISING);
 
-  // TODO: pinMode LUMOS_LED_PIN as OUTPUT, initialize it LOW (off)
+  pinMode(LUMOS_MOSFET_CONTROL_PIN, OUTPUT);
+  digitalWrite(LUMOS_MOSFET_CONTROL_PIN, LOW);
 
   Serial.begin(115200);
   analogReadResolution(12);  // 12-bit resolution (if available)
@@ -326,7 +341,7 @@ void setup() {
 
   hitProcessTimer_init();
   leviosaProcessTimer_init();
-  // TODO: Initialize lumos timer (same pattern as hitProcessTimer_init)
+  lumosProcessTimer_init();
   
   // Allow allocation of all timers
   ESP32PWM::allocateTimer(0);
@@ -360,9 +375,12 @@ void loop() {
     
     // Leviosa channel — read on the same tick (negligible overhead)
     fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
+
+    fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
     
     sampleIndex++;
     sampleIndex_leviosa++;
+    sampleIndex_lumos++;
 
     // If the buffer is full, process the FFT
     if (sampleIndex >= FFT_N) {
@@ -406,6 +424,24 @@ void loop() {
       //       Same TARGET_FREQ and threshold check (same frequency, different pin)
       //       Check lumos_state == WAITING
       //       If all pass: call process_lumos()
+
+    if (sampleIndex_lumos >= FFT_N) {
+    float fft_return_lumos[2];
+    processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+    sampleIndex_lumos = 0;
+
+    float freq_lumos = fft_return_lumos[0];
+    float mag_lumos  = fft_return_lumos[1];
+
+    // --- Lumos hit detection ---
+    if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
+        freq_lumos   <= (TARGET_FREQ * 1.1) &&
+        mag_lumos    >= threshold &&
+        lumos_state == WAITING) {
+      Serial.println("Lumos hit detected!");
+      process_lumos();
+    }
+  }
 
   }
 
@@ -483,11 +519,17 @@ void process_hit() {
   hitProcessTimer_start();
 }
 
-static TimerHandle_t hitProcessTimer = NULL;  // Initialize a timer handle
+void process_lumos() {
+  digitalWrite(LUMOS_MOSFET_CONTROL_PIN, HIGH);
+  lumosProcessTimer_start();
+}
 
-// Timer callback (automatically resets xLockoutActive)
+static TimerHandle_t hitProcessTimer = NULL;  // Initialize a timer handle
+static TimerHandle_t lumosProcessTimer = NULL; // Initialize lumos timer
+
+// Pixie timer callback (automatically resets xLockoutActive)
 static void hitProcessCallback(TimerHandle_t xTimer) {
-  Serial.println("done!");
+  Serial.println("Pixie hit response complete!");
   digitalWrite(HIT_LED, LOW); // Turn the LED on
 
   for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos -= 1) {  // goes from 180 degrees to 0 degrees
@@ -500,10 +542,20 @@ static void hitProcessCallback(TimerHandle_t xTimer) {
   hit_state = WAITING;
 }
 
-// TODO: Add lumosProcessCallback - Ben has code to implement the motor functionality
-// TODO: Add leviosaProcessCallback - Turn on for x amount of time, then turn off.
+// Leviosa timer callback
+static void leviosaProcessCallback(TimerHandle_t xTimer) {
+  Serial.println("Leviosa hit response complete!");
+  leviosa_state = WAITING;
+}
 
-// Init the Timer
+// Lumos timer callback
+static void lumosProcessCallback(TimerHandle_t xTimer) {
+  Serial.println("Lumos hit response complete!");
+  digitalWrite(LUMOS_MOSFET_CONTROL_PIN, LOW);
+  lumos_state = WAITING;
+}
+
+// Init the Pixie Timer
 int32_t hitProcessTimer_init(void) {
   hitProcessTimer = xTimerCreate(
     "hitTimer",                        // Name
@@ -520,23 +572,65 @@ int32_t hitProcessTimer_init(void) {
   return 0;
 }
 
-// TODO: Add lumosProcessTimer_init() here, parallel to hitProcessTimer_init()
-//       - Same xTimerCreate pattern, pointing to lumosProcessCallback
-//       - Set lumos_state = WAITING
 
-// TODO: Add leviosaProcessTimer_init() here, parallel to hitProcessTimer_init()
-//       - Same xTimerCreate pattern, pointing to leviosaProcessCallback
-//       - Set leviosa_state = WAITING
+int32_t leviosaProcessTimer_init(void) {
+  leviosaProcessTimer = xTimerCreate(
+    "leviosaTimer",                        // Name
+    pdMS_TO_TICKS(LUMOS_PROCESS_TIMER),  // Period (converted to ticks)
+    pdFALSE,                           // Auto-reload = false (one-shot)
+    (void *)0,                         // Timer ID (unused)
+    leviosaProcessCallback                 // Callback function
+  );
 
-// Start the timer from the beginning.
+  if (leviosaProcessTimer == NULL) {
+    return -1;  // Timer creation failed
+  }
+  leviosa_state = WAITING;
+  return 0;
+}
+
+int32_t lumosProcessTimer_init(void) {
+  lumosProcessTimer = xTimerCreate(
+    "lumosTimer",                        // Name
+    pdMS_TO_TICKS(LUMOS_PROCESS_TIMER),  // Period (converted to ticks)
+    pdFALSE,                           // Auto-reload = false (one-shot)
+    (void *)0,                         // Timer ID (unused)
+    lumosProcessCallback                 // Callback function
+  );
+
+  if (lumosProcessTimer == NULL) {
+    return -1;  // Timer creation failed
+  }
+  lumos_state = WAITING;
+  return 0;
+}
+
+// Start the pixie timer from the beginning.
 void hitProcessTimer_start(void) {
   // If initialized
-  Serial.println("starting!");
+  Serial.println("Pixie timer starting!");
   if (hitProcessTimer != NULL) {
     xTimerReset(hitProcessTimer, 0);  // Timer Restart
     hit_state = PROCESSING;
   }
 }
 
-// TODO: Add lumosProcessTimer_start() here, parallel to hitProcessTimer_start()
-// TODO: Add leviosaProcessTimer_start() here, parallel to hitProcessTimer_start()
+// Start the leviosa timer from the beginning.
+void leviosaProcessTimer_start(void) {
+  // If initialized
+  Serial.println("Leviosa timer starting!");
+  if (leviosaProcessTimer != NULL) {
+    xTimerReset(leviosaProcessTimer, 0);  // Timer Restart
+    leviosa_state = PROCESSING;
+  }
+}
+
+// Start the lumos timer from the beginning.
+void lumosProcessTimer_start(void) {
+  // If initialized
+  Serial.println("Lumos timer starting!");
+  if (lumosProcessTimer != NULL) {
+    xTimerReset(lumosProcessTimer, 0);  // Timer Restart
+    lumos_state = PROCESSING;
+  }
+}
