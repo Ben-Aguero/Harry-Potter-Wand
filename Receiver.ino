@@ -39,6 +39,7 @@
 #define ENCODER_B       33     // Can change any of these
 #define PWM_FREQ       30000
 #define PWM_RESOLUTION 8
+#define LEVIOSA_COOLDOWN_MS 5000
 
 ///////////////////// Lumos /////////////////////
 #define ADC_PIN_LUMOS 37
@@ -226,32 +227,10 @@ void leviosaSequenceTask(void *pvParameters) {
 }
 
 //------------------------------ Leviosa Timer ---------------------------------------
-static TimerHandle_t leviosaProcessTimer = NULL;
 
-static void leviosaProcessCallback(TimerHandle_t xTimer) {
-  Serial.println("Leviosa cooldown done.");
-  leviosa_state = WAITING;
-}
 
-int32_t leviosaProcessTimer_init(void) {
-  leviosaProcessTimer = xTimerCreate(
-    "leviosaTimer",
-    pdMS_TO_TICKS(LEVIOSA_COOLDOWN_MS),
-    pdFALSE, (void *)0,
-    leviosaProcessCallback
-  );
-  if (leviosaProcessTimer == NULL) return -1;
-  leviosa_state = WAITING;
-  return 0;
-}
 
-void leviosaProcessTimer_start(void) {
-  Serial.println("Leviosa — starting cooldown timer.");
-  if (leviosaProcessTimer != NULL) {
-    xTimerReset(leviosaProcessTimer, 0);
-    leviosa_state = PROCESSING;
-  }
-}
+
 
 // Spawn the FreeRTOS task that runs the animation sequence.
 // Called from the FFT detection block — must not block.
@@ -524,8 +503,13 @@ void process_lumos() {
   lumosProcessTimer_start();
 }
 
-static TimerHandle_t hitProcessTimer = NULL;  // Initialize a timer handle
+/////////////////// Declare process timer handles ///////////////////
+
+static TimerHandle_t hitProcessTimer = NULL;  // Initialize pixie timer handle
+static TimerHandle_t leviosaProcessTimer = NULL; // Initialize leviosa timer handle
 static TimerHandle_t lumosProcessTimer = NULL; // Initialize lumos timer
+
+/////////////////// Define process callbacks ///////////////////
 
 // Pixie timer callback (automatically resets xLockoutActive)
 static void hitProcessCallback(TimerHandle_t xTimer) {
@@ -544,7 +528,7 @@ static void hitProcessCallback(TimerHandle_t xTimer) {
 
 // Leviosa timer callback
 static void leviosaProcessCallback(TimerHandle_t xTimer) {
-  Serial.println("Leviosa hit response complete!");
+  Serial.println("Leviosa cooldown done.");
   leviosa_state = WAITING;
 }
 
@@ -554,6 +538,8 @@ static void lumosProcessCallback(TimerHandle_t xTimer) {
   digitalWrite(LUMOS_MOSFET_CONTROL_PIN, LOW);
   lumos_state = WAITING;
 }
+
+/////////////////// Initialize process timers ///////////////////
 
 // Init the Pixie Timer
 int32_t hitProcessTimer_init(void) {
@@ -575,16 +561,12 @@ int32_t hitProcessTimer_init(void) {
 
 int32_t leviosaProcessTimer_init(void) {
   leviosaProcessTimer = xTimerCreate(
-    "leviosaTimer",                        // Name
-    pdMS_TO_TICKS(LUMOS_PROCESS_TIMER),  // Period (converted to ticks)
-    pdFALSE,                           // Auto-reload = false (one-shot)
-    (void *)0,                         // Timer ID (unused)
-    leviosaProcessCallback                 // Callback function
+    "leviosaTimer",
+    pdMS_TO_TICKS(LEVIOSA_COOLDOWN_MS),
+    pdFALSE, (void *)0,
+    leviosaProcessCallback
   );
-
-  if (leviosaProcessTimer == NULL) {
-    return -1;  // Timer creation failed
-  }
+  if (leviosaProcessTimer == NULL) return -1;
   leviosa_state = WAITING;
   return 0;
 }
@@ -605,6 +587,8 @@ int32_t lumosProcessTimer_init(void) {
   return 0;
 }
 
+/////////////////// Begin process timers ///////////////////
+
 // Start the pixie timer from the beginning.
 void hitProcessTimer_start(void) {
   // If initialized
@@ -617,10 +601,9 @@ void hitProcessTimer_start(void) {
 
 // Start the leviosa timer from the beginning.
 void leviosaProcessTimer_start(void) {
-  // If initialized
-  Serial.println("Leviosa timer starting!");
+  Serial.println("Leviosa — starting cooldown timer.");
   if (leviosaProcessTimer != NULL) {
-    xTimerReset(leviosaProcessTimer, 0);  // Timer Restart
+    xTimerReset(leviosaProcessTimer, 0);
     leviosa_state = PROCESSING;
   }
 }
