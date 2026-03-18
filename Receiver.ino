@@ -1,10 +1,13 @@
 #include "FFT.h"
 #include "DFRobotDFPlayerMini.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include <ESP32Servo.h>
 
+/////For Debugging/////
 // TODO: Define LEVIOSA_LED_PIN (or LED strip pin) for the leviosa levitation effect
 // TODO: Define LUMOS_LED_PIN (or LED strip pin) for the lumos light effect
+///////////////////////
 
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
@@ -22,6 +25,236 @@
 #define MAX_VOLUME 30         // Max volume value
 #define MAX_THRESHOLD 20000   // Max possible threshold 
 #define MIN_THRESHOLD 100     // Min possible threshold
+
+/////////////// Leviosa /////////////////////
+#define ADC_PIN_LEVIOSA 36  // Second wand ADC for leviosa detection (adjust as needed)
+#define ENA_PIN         25
+#define IN1_PIN         26
+#define IN2_PIN         27
+#define ENCODER_A       32
+#define ENCODER_B       33     // Can change any of these
+#define PWM_FREQ       30000
+#define PWM_RESOLUTION 8
+
+// PI tuning
+const float Kp = 2.0f;
+const float Ki = 0.03f;
+
+// PWM travel limits
+const int MIN_PWM_UP   = 65;
+const int MAX_PWM_UP   = 155;
+const int MIN_PWM_DOWN = 22;
+const int MAX_PWM_DOWN = 75;
+const int DEADBAND     = 5;
+
+// Encoder state (volatile — written in ISR)
+volatile long          currentPosition = 0;
+volatile unsigned long lastISRTime     = 0;
+
+void IRAM_ATTR encoderISR() {
+  unsigned long now = micros();
+  if (now - lastISRTime > 500) {
+    currentPosition += (digitalRead(ENCODER_B) > 0) ? 1 : -1;
+  }
+  lastISRTime = now;
+}
+
+// Leviosa FFT buffers (separate channel)
+float fft_input_leviosa[FFT_N];
+float fft_output_leviosa[FFT_N];
+int   sampleIndex_leviosa = 0;
+static TaskHandle_t leviosaTaskHandle = NULL;
+
+// Motor helpers
+void motorStop() {
+  ledcWrite(ENA_PIN, 0);
+  digitalWrite(IN1_PIN, LOW);
+  digitalWrite(IN2_PIN, LOW);
+}
+
+// Drive motor in the direction implied by error's sign, with per-direction PWM limits.
+void motorDrive(long error, int rawPWM) {
+  int pwr = abs(rawPWM);
+  if (error > 0) {
+    pwr = constrain(pwr, MIN_PWM_UP, MAX_PWM_UP);
+    digitalWrite(IN1_PIN, HIGH);
+    digitalWrite(IN2_PIN, LOW);
+    ledcWrite(ENA_PIN, pwr);
+  } else {
+    pwr = constrain(pwr, MIN_PWM_DOWN, MAX_PWM_DOWN);
+    digitalWrite(IN1_PIN, LOW);
+    digitalWrite(IN2_PIN, HIGH);
+    ledcWrite(ENA_PIN, pwr);
+  }
+}
+
+//---------------------------PI Position Hold--------------------------------------------
+bool moveAndHold(long target, int holdMs, bool cutPower, unsigned long timeoutMs = 5000) {
+  long errorSum  = 0;
+  long prevError = 0;
+  bool reached   = false;
+  unsigned long reachedAt = 0;
+  unsigned long startedAt = millis();
+
+  while (true) {
+    if ((millis() - startedAt) > timeoutMs) {
+      Serial.println("WARN: moveAndHold timeout!");
+      motorStop();
+      return false;
+    }
+
+    long pos_snap = currentPosition;
+    long error    = target - pos_snap;
+
+    if (abs(error) <= DEADBAND) {
+      motorStop();
+      errorSum = 0;
+      if (!reached) { reached = true; reachedAt = millis(); }
+      if ((millis() - reachedAt) >= (unsigned long)holdMs) {
+        if (cutPower) motorStop();
+        return true;
+      }
+      delay(2);
+      continue;
+    }
+
+    reached = false;
+
+    if (abs(error) < 60) {
+      if ((error > 0) != (prevError > 0)) errorSum = 0;
+      errorSum = constrain(errorSum + error, -3000L, 3000L);
+    } else {
+      errorSum = 0;
+    }
+    prevError = error;
+
+    int rawPWM = (int)((error * Kp) + (errorSum * Ki));
+    motorDrive(error, rawPWM);
+    delay(2);
+  }
+}
+
+//---------------------------- Smooth Glide for motor-------------------------
+bool glideToPosition(long endPos, unsigned long durationMs) {
+  long startPos  = currentPosition;
+  long errorSum  = 0;
+  long prevError = 0;
+  unsigned long startTime = millis();
+  const unsigned long SETTLE_TIMEOUT = 2000;
+
+  Serial.print("Glide "); Serial.print(startPos);
+  Serial.print(" -> ");   Serial.println(endPos);
+
+  while (true) {
+    unsigned long elapsed = millis() - startTime;
+
+    long movingTarget;
+    if (elapsed < durationMs) {
+      float t     = (float)elapsed / (float)durationMs;
+      movingTarget = startPos + (long)((endPos - startPos) * t);
+    } else {
+      movingTarget = endPos;
+      if (abs(endPos - currentPosition) <= DEADBAND) { motorStop(); return true; }
+      if ((elapsed - durationMs) > SETTLE_TIMEOUT) {
+        Serial.println("WARN: glide settle timeout!");
+        motorStop();
+        return false;
+      }
+    }
+
+    long error = movingTarget - currentPosition;
+
+    if (abs(error) <= DEADBAND) { motorStop(); delay(2); continue; }
+
+    if (abs(error) < 60) {
+      if ((error > 0) != (prevError > 0)) errorSum = 0;
+      errorSum = constrain(errorSum + error, -3000L, 3000L);
+    } else {
+      errorSum = 0;
+    }
+    prevError = error;
+
+    int rawPWM = (int)((error * Kp) + (errorSum * Ki));
+    motorDrive(error, rawPWM);
+    delay(2);
+  }
+}
+
+//----------------------- Leviosa FreeRTOS Task ------------------------------------
+void leviosaSequenceTask(void *pvParameters) {
+  Serial.println("=== Leviosa START ===");
+
+  // TODO: digitalWrite(LEVIOSA_LED_PIN, HIGH);  // turn on levitation LED
+
+  // Rise and hang
+  moveAndHold(190, 300, false, 6000);
+
+  // Bob twice
+  for (int i = 0; i < 2; i++) {
+    glideToPosition(100, 800);
+    glideToPosition(170, 800);
+  }
+
+  // Smooth descent back to rest
+  glideToPosition(0, 3000);
+  motorStop();
+
+  // TODO: digitalWrite(LEVIOSA_LED_PIN, LOW);   // turn off levitation LED
+
+  Serial.println("=== Leviosa COMPLETE — starting cooldown ===");
+
+  // Start the cooldown timer so leviosa_state returns to WAITING after the
+  // configured delay (prevents immediate re-trigger).
+  leviosaProcessTimer_start();   // forward-declared below
+
+  leviosaTaskHandle = NULL;
+  vTaskDelete(NULL);  // task cleans itself up
+}
+
+//------------------------------ Leviosa Timer ---------------------------------------
+static TimerHandle_t leviosaProcessTimer = NULL;
+
+static void leviosaProcessCallback(TimerHandle_t xTimer) {
+  Serial.println("Leviosa cooldown done.");
+  leviosa_state = WAITING;
+}
+
+int32_t leviosaProcessTimer_init(void) {
+  leviosaProcessTimer = xTimerCreate(
+    "leviosaTimer",
+    pdMS_TO_TICKS(LEVIOSA_COOLDOWN_MS),
+    pdFALSE, (void *)0,
+    leviosaProcessCallback
+  );
+  if (leviosaProcessTimer == NULL) return -1;
+  leviosa_state = WAITING;
+  return 0;
+}
+
+void leviosaProcessTimer_start(void) {
+  Serial.println("Leviosa — starting cooldown timer.");
+  if (leviosaProcessTimer != NULL) {
+    xTimerReset(leviosaProcessTimer, 0);
+    leviosa_state = PROCESSING;
+  }
+}
+
+// Spawn the FreeRTOS task that runs the animation sequence.
+// Called from the FFT detection block — must not block.
+void process_leviosa() {
+  if (leviosaTaskHandle != NULL) return;  // already running (guard)
+  leviosa_state = PROCESSING;
+  currentPosition = 0;  // re-zero encoder on each cast
+  xTaskCreate(
+    leviosaSequenceTask,  // task function
+    "LeviosaTask",        // name (debug)
+    4096,                 // stack size (bytes) — increase if moveAndHold uses more
+    NULL,                 // parameters
+    1,                    // priority (1 = low, fine for motor control)
+    &leviosaTaskHandle    // handle out
+  );
+}
+///////////////////////////////
 
 #define MOVE_DELAY 10
 
@@ -56,7 +289,18 @@ void setup() {
   digitalWrite(LED_PIN, HIGH); // Turn the LED on
   digitalWrite(HIT_LED, HIGH); // Turn the LED on
 
-  // TODO: pinMode LEVIOSA_LED_PIN as OUTPUT, intialize it LOW (off)
+  // Motor pins
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+  ledcAttach(ENA_PIN, PWM_FREQ, PWM_RESOLUTION);
+  motorStop();
+  currentPosition = 0;
+
+  // Encoder
+  pinMode(ENCODER_A, INPUT_PULLUP);
+  pinMode(ENCODER_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_A), encoderISR, RISING);
+
   // TODO: pinMode LUMOS_LED_PIN as OUTPUT, initialize it LOW (off)
 
   Serial.begin(115200);
@@ -81,10 +325,9 @@ void setup() {
   myDFPlayer.enableLoop();
 
   hitProcessTimer_init();
-
+  leviosaProcessTimer_init();
   // TODO: Initialize lumos timer (same pattern as hitProcessTimer_init)
-  // TODO: Initialize leviosa timer (same pattern as hitProcessTimer_init)
-
+  
   // Allow allocation of all timers
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
@@ -114,7 +357,12 @@ void loop() {
 
     // Read ADC value and store it in the buffer
     fft_input[sampleIndex] = analogRead(ADC_PIN);  // Replace with your ADC pin
+    
+    // Leviosa channel — read on the same tick (negligible overhead)
+    fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
+    
     sampleIndex++;
+    sampleIndex_leviosa++;
 
     // If the buffer is full, process the FFT
     if (sampleIndex >= FFT_N) {
@@ -132,20 +380,33 @@ void loop() {
         process_hit();  // Process hit
       }
 
-      // TODO: Leviosa hit detection - separate if block, NOT nested inside pixie hit above
-      //       Read from fft_input_leviosa[] buffer filled by ADC_PIN_LEVIOSA
-      //       Same TARGET_FREQ and threshold check (same frequency, different pin)
-      //       Check leviosa_state == WAITING
-      //       If all pass: call process_leviosa()
-      //       process_leviosa() must xTaskCreate a FreeRTOS task for the
-      //       moveAndHold/glide sequence so it doesn't block FFT sampling
+      
+    }
 
-      // TODO: Lumos hit detection - separate if block, NOT nested inside pixie hit above
+    if (sampleIndex_leviosa >= FFT_N) {
+      float fft_return_lev[2];
+      processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
+      sampleIndex_leviosa = 0;
+
+      float freq_lev = fft_return_lev[0];
+      float mag_lev  = fft_return_lev[1];
+
+      // --- Leviosa hit detection ---
+      if (freq_lev   >= (TARGET_FREQ * 0.9) &&
+          freq_lev   <= (TARGET_FREQ * 1.1) &&
+          mag_lev    >= threshold &&
+          leviosa_state == WAITING) {
+        Serial.println("Leviosa hit detected!");
+        process_leviosa();   // spawns FreeRTOS task — non-blocking
+      }
+    }
+
+    // TODO: Lumos hit detection - separate if block, NOT nested inside pixie hit above
       //       Read from fft_input_lumos[] buffer filled by ADC_PIN_LUMOS
       //       Same TARGET_FREQ and threshold check (same frequency, different pin)
       //       Check lumos_state == WAITING
       //       If all pass: call process_lumos()
-    }
+
   }
 
   // Check potentiometer values (100Hz Check)
@@ -262,10 +523,6 @@ int32_t hitProcessTimer_init(void) {
 // TODO: Add lumosProcessTimer_init() here, parallel to hitProcessTimer_init()
 //       - Same xTimerCreate pattern, pointing to lumosProcessCallback
 //       - Set lumos_state = WAITING
-
-// TODO: Add leviosaProcessTimer_init() here, parallel to hitProcessTimer_init()
-//       - Same xTimerCreate pattern, pointing to leviosaProcessCallback
-//       - Set leviosa_state = WAITING
 
 // Start the timer from the beginning.
 void hitProcessTimer_start(void) {
