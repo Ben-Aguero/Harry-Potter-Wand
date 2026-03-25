@@ -2,11 +2,14 @@
 #include "DFRobotDFPlayerMini.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#include "freertos/timers.h"
 #include <ESP32Servo.h>
 
 /////For Debugging/////
+/////For Debugging/////
 // TODO: Define LEVIOSA_LED_PIN (or LED strip pin) for the leviosa levitation effect
 // TODO: Define LUMOS_LED_PIN (or LED strip pin) for the lumos light effect
+///////////////////////
 ///////////////////////
 
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
@@ -377,6 +380,26 @@ void loop() {
         process_hit();  // Process hit
       }
 
+      
+    }
+
+    if (sampleIndex_leviosa >= FFT_N) {
+      float fft_return_lev[2];
+      processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
+      sampleIndex_leviosa = 0;
+
+      float freq_lev = fft_return_lev[0];
+      float mag_lev  = fft_return_lev[1];
+
+      // --- Leviosa hit detection ---
+      if (freq_lev   >= (TARGET_FREQ * 0.9) &&
+          freq_lev   <= (TARGET_FREQ * 1.1) &&
+          mag_lev    >= threshold &&
+          leviosa_state == WAITING) {
+        Serial.println("Leviosa hit detected!");
+        process_leviosa();   // spawns FreeRTOS task — non-blocking
+      }
+    }
       
     }
 
