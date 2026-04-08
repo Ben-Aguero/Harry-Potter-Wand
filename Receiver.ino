@@ -44,7 +44,7 @@
 
 ///////////////////// Lumos /////////////////////
 #define ADC_PIN_LUMOS 0
-#define LUMOS_MOSFET_CONTROL_PIN 23 
+#define LUMOS_MOSFET_CONTROL_PIN 18
 
 
 void leviosaProcessTimer_start(void);
