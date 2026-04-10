@@ -1,4 +1,4 @@
-#include "fft.h"
+#include "FFT.h"
 #include "DFRobotDFPlayerMini.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
