@@ -7,10 +7,10 @@
 
 
 
-#define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
+#define SAMPLE_RATE 10000       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
 #define FFT_N 1024              // FFT Size
-#define TARGET_FREQ 5000.0      // Frequency of wand signal
+#define TARGET_FREQ 4000.0      // Frequency of wand signal
 #define HIT_PROCESS_TIMER 5000  // Time before another hit can be detected after hit
 #define LUMOS_PROCESS_TIMER 5000 // Time before an additional lumos hit can be processed
 #define LED_PIN 14            // Debugging LED
@@ -641,7 +641,7 @@ void loop() {
   // Serial.println("Taking a sample");
   // If it's time to take a sample
   if (currentMicros - previousMicros >= sampleInterval) {
-    previousMicros = currentMicros;
+    previousMicros += sampleInterval;
 
     // Read ADC value and store it in the buffer
     fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);  // Replace with your ADC pin
@@ -664,10 +664,10 @@ void loop() {
       float fundamental_freq = fft_return[0];
       float max_magnitude = fft_return[1];
       
-      // Serial.print("pixie freq: ");
-      // Serial.println(fundamental_freq);
-      // Serial.print("pixie mag: ");
-      // Serial.println(max_magnitude);
+      Serial.print("pixie freq: ");
+      Serial.println(fundamental_freq);
+      Serial.print("pixie mag: ");
+      Serial.println(max_magnitude);
       if (fundamental_freq >= (TARGET_FREQ * LOW_THRESHOLD) && 
           fundamental_freq <= (TARGET_FREQ * HIGH_THRESHOLD) && 
           (max_magnitude >= threshold) && 
