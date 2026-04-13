@@ -284,10 +284,10 @@ void processFFT(float* input, float* output, float fft_return[2]) {
 void process_pixie() {
 
   // Play other song
-  myDFPlayer.advertise(1);
+  // myDFPlayer.advertise(1);
 
   // Turn on hit
-  digitalWrite(PIXIE_HIT_LED, HIGH); // Turn the pixie LEDs on
+  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs on
 
   // Run servo
   for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 1) {  // goes from 0 degrees to 180 degrees
@@ -317,6 +317,7 @@ void process_leviosa() {
 }
 
 void process_lumos() {
+  Serial.println("Processing Lumos");
   digitalWrite(LUMOS_MOSFET_CONTROL_PIN, HIGH);
   lumosProcessTimer_start();
 }
@@ -456,23 +457,23 @@ void setup() {
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   delay(200);  // My preference for print stability
 
-  if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
-    Serial.println("ERROR");
-  }
+  // if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
+  //   Serial.println("ERROR");
+  // }
 
-  Serial.println();
-  Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
+  // Serial.println();
+  // Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
 
-  delay(1000);  // Add this to allow player to fully initialise
+  // delay(1000);  // Add this to allow player to fully initialise
   
-  myDFPlayer.volume(20);  //Set volume value. From 0 to 30
-  delay(500);
-  myDFPlayer.loop(1);
-  delay(500);
-  myDFPlayer.enableLoop();
+  // myDFPlayer.volume(20);  //Set volume value. From 0 to 30
+  // delay(500);
+  // myDFPlayer.loop(1);
+  // delay(500);
+  // myDFPlayer.enableLoop();
 
-  hitProcessTimer_init();
-  leviosaProcessTimer_init();
+  // hitProcessTimer_init();
+  // leviosaProcessTimer_init();
   lumosProcessTimer_init();
   
   // Allow allocation of all timers
@@ -486,41 +487,52 @@ void setup() {
                                         // different servos may require different min/max settings
                                         // for an accurate 0 to 180 sweep
 
-  digitalWrite(LED_PIN, LOW); // Turn the LED on
-  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the LED on
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(PIXIE_HIT_LED, LOW);
 
   myservo.write(pos);  // Initialize to the standing position
 
   Serial.println("setup ended");  // I like this reassurance
+  // pixieResetRequested = true;
+  // Serial.println("requested pixie reset");
 }
 
 // Main Loop
 void loop() {
+  // Serial.println("calling micros()");
   unsigned long currentMicros = micros();
+  // Serial.println("calling micros() again");
   unsigned long currentMicrosPot = micros();
 
   // Pixie movement
-  if (pixieResetRequested) {
-    pixieResetRequested = false;
+  // if (pixieResetRequested) {
+  //   Serial.println("Starting pixie reset");
+  //   pixieResetRequested = false;
+  //   for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos--) {
+  //     // Serial.print("Writing servo to ");
+  //     // Serial.println(pos);
+  //     myservo.write(pos);
+  //     // Serial.print("Wrote servo to ");
+  //     // Serial.println(pos);
+  //     delay(MOVE_DELAY);
+  //     // Serial.println("Move delay complete");
+  //   }
 
-    for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos--) {
-      myservo.write(pos);
-      delay(MOVE_DELAY);
-    }
+  //   // myDFPlayer.enableLoop();
+  //   hit_state = WAITING;
+  //   Serial.println("Pixie has been reset");
+  // }
 
-    myDFPlayer.enableLoop();
-    hit_state = WAITING;
-  }
-
+  // Serial.println("Taking a sample");
   // If it's time to take a sample
   if (currentMicros - previousMicros >= sampleInterval) {
     previousMicros = currentMicros;
 
     // Read ADC value and store it in the buffer
-    fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);  // Replace with your ADC pin
+    // fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);  // Replace with your ADC pin
     
     // Leviosa channel — read on the same tick (negligible overhead)
-    fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
+    // fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
 
     fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
     
@@ -529,40 +541,41 @@ void loop() {
     sampleIndex_lumos++;
 
     // If the buffer is full, process the FFT
-    if (sampleIndex_pixie >= FFT_N) {
-      float fft_return[2];
-      processFFT(fft_input_pixie, fft_output, fft_return);
-      sampleIndex_pixie = 0;  // Reset the sample index for the next batch
-      float fundamental_freq = fft_return[0];
-      float max_magnitude = fft_return[1];
+    // if (sampleIndex_pixie >= FFT_N) {
+    //   float fft_return[2];
+    //   processFFT(fft_input_pixie, fft_output, fft_return);
+    //   sampleIndex_pixie = 0;  // Reset the sample index for the next batch
+    //   float fundamental_freq = fft_return[0];
+    //   float max_magnitude = fft_return[1];
 
-      if (fundamental_freq >= (TARGET_FREQ * 0.9) && fundamental_freq <= (TARGET_FREQ * 1.1) && (max_magnitude >= threshold) && (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
-        Serial.println("Hit detected!\n");
-        process_pixie();  // Process hit
-      }
+    //   if (fundamental_freq >= (TARGET_FREQ * 0.9) && fundamental_freq <= (TARGET_FREQ * 1.1) && (max_magnitude >= threshold) && (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
+    //     Serial.println("Hit detected!\n");
+    //     process_pixie();  // Process hit
+    //   }
 
       
-      }
+    // }
 
-      if (sampleIndex_leviosa >= FFT_N) {
-        float fft_return_lev[2];
-        processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
-        sampleIndex_leviosa = 0;
+      // if (sampleIndex_leviosa >= FFT_N) {
+      //   float fft_return_lev[2];
+      //   processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
+      //   sampleIndex_leviosa = 0;
 
-        float freq_lev = fft_return_lev[0];
-        float mag_lev  = fft_return_lev[1];
+      //   float freq_lev = fft_return_lev[0];
+      //   float mag_lev  = fft_return_lev[1];
 
-        // --- Leviosa hit detection ---
-        if (freq_lev   >= (TARGET_FREQ * 0.9) &&
-            freq_lev   <= (TARGET_FREQ * 1.1) &&
-            mag_lev    >= threshold &&
-            leviosa_state == WAITING) {
-          Serial.println("Leviosa hit detected!");
-          process_leviosa();   // spawns FreeRTOS task — non-blocking
-        }
-      }
+      //   // --- Leviosa hit detection ---
+      //   if (freq_lev   >= (TARGET_FREQ * 0.9) &&
+      //       freq_lev   <= (TARGET_FREQ * 1.1) &&
+      //       mag_lev    >= threshold &&
+      //       leviosa_state == WAITING) {
+      //     Serial.println("Leviosa hit detected!");
+      //     process_leviosa();   // spawns FreeRTOS task — non-blocking
+      //   }
+      // }
 
     if (sampleIndex_lumos >= FFT_N) {
+      // Serial.println("Starting lumos detect");
       float fft_return_lumos[2];
       processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
       sampleIndex_lumos = 0;
@@ -578,24 +591,25 @@ void loop() {
           Serial.println("Lumos hit detected!");
           process_lumos();
         }
+      // Serial.println("Ending lumos detect");
     }
 
     // Check potentiometer values (100Hz Check)
-    if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
-      previousMicrosPot = currentMicrosPot;
+    // if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
+    //   previousMicrosPot = currentMicrosPot;
 
-      // if (checkCycle % 2 == 0) {  // Alternate between checks
-      int volume_adc = analogRead(VOLUME_PIN);
-      int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
-      myDFPlayer.volume(volume_val);
+    //   // if (checkCycle % 2 == 0) {  // Alternate between checks
+    //   int volume_adc = analogRead(VOLUME_PIN);
+    //   int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
+    //   myDFPlayer.volume(volume_val);
 
-      int state = myDFPlayer.readState(); // Get the playback state
+    //   int state = myDFPlayer.readState(); // Get the playback state
 
-      if (state == 2) { // 0 means the player is in the stopped state
-        delay(500); // Wait to send another command
-        digitalWrite(LED_PIN, HIGH); // Turn the LED on
-        myDFPlayer.loop(1); // Replay or loop the desired file
-      }
-    }
+    //   if (state == 2) { // 0 means the player is in the stopped state
+    //     delay(500); // Wait to send another command
+    //     digitalWrite(LED_PIN, HIGH); // Turn the LED on
+    //     myDFPlayer.loop(1); // Replay or loop the desired file
+    //   }
+    // }
   }
 }
