@@ -2,12 +2,12 @@
 #include "DFRobotDFPlayerMini.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
-#include <ESP32Servo.h>
+// #include <ESP32Servo.h>
 #include <math.h>
 
 
 
-#define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
+#define SAMPLE_RATE 10000       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
 #define FFT_N 1024              // FFT Size
 #define TARGET_FREQ 4000.0      // Frequency of wand signal
@@ -28,8 +28,8 @@
 #define ADC_PIN_PIXIE 15      // Pin for Pixie detection ADC
 #define PIXIE_HIT_LED 12            // Pin for Pixie LEDs
 #define PIXIE_SERVO_CONTROL_PIN 13    // Pin for Pixie servo control
-#define INITIAL_POSITION 85   // Starting position for pixie servo in degrees
-#define FINAL_POSITION 175    // Hit position for pixie servo in degrees
+#define INITIAL_POSITION 90   // Starting position for pixie servo in degrees
+#define FINAL_POSITION 180    // Hit position for pixie servo in degrees
 
 ///////////////////// Leviosa /////////////////////
 #define ADC_PIN_LEVIOSA 2  // Second wand ADC for leviosa detection (adjust as needed)
@@ -53,6 +53,9 @@ DFRobotDFPlayerMini myDFPlayer; // Initialize the DFPlayer object
 #define RXD2 5
 #define TXD2 4
 
+#define LOW_THRESHOLD 0.9
+#define HIGH_THRESHOLD 1.1
+
 void leviosaProcessTimer_start(void);
 
 // Pixie control variable
@@ -71,7 +74,7 @@ hit_state_e hit_state = WAITING;
 hit_state_e leviosa_state = WAITING;
 hit_state_e lumos_state = WAITING;
 
-Servo myservo;  // create servo object to control a servo
+// Servo myservo;  // create servo object to control a servo
 int pos = INITIAL_POSITION;    // Servo location
 int servoPin = PIXIE_SERVO_CONTROL_PIN;
 
@@ -90,6 +93,8 @@ const int DEADBAND     = 5;
 volatile long          currentPosition = 0;
 volatile unsigned long lastISRTime     = 0;
 
+// (Do the same for Leviosa when you uncomment it)
+
 void IRAM_ATTR encoderISR() {
   unsigned long now = micros();
   if (now - lastISRTime > 500) {
@@ -99,20 +104,24 @@ void IRAM_ATTR encoderISR() {
 }
 
 // Pixie FFT buffers
-float fft_input_pixie[FFT_N];   // ADC sample buffer
-float fft_output[FFT_N];  // FFT output buffer
+float fft_input_pixie[FFT_N];   
+float fft_output[FFT_N];
 int sampleIndex_pixie = 0;
+static TaskHandle_t pixieTaskHandle = NULL;
+fft_config_t *pixie_fft_plan = NULL;
+
+// Lumos FFT buffers
+float fft_input_lumos[FFT_N];
+float fft_output_lumos[FFT_N];
+int sampleIndex_lumos = 0;
+fft_config_t *lumos_fft_plan = NULL;
 
 // Leviosa FFT buffers (separate channel)
 float fft_input_leviosa[FFT_N];
 float fft_output_leviosa[FFT_N];
 int sampleIndex_leviosa = 0;
 static TaskHandle_t leviosaTaskHandle = NULL;
-
-// Lumos FFT buffers
-float fft_input_lumos[FFT_N];
-float fft_output_lumos[FFT_N];
-int sampleIndex_lumos = 0;
+fft_config_t *leviosa_fft_plan = NULL;
 
 // Motor helpers
 void motorStop() {
@@ -262,42 +271,115 @@ void leviosaSequenceTask(void *pvParameters) {
 
 
 // Function to process the FFT on the collected samples
-void processFFT(float* input, float* output, float fft_return[2]) {
-  fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, input, output);
-  fft_execute(real_fft_plan);
+// void processFFT(float* input, float* output, float fft_return[2]) {
+//   fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, input, output);
+//   fft_execute(real_fft_plan);
+
+//   float max_magnitude = 0;
+//   float fundamental_freq = 0;
+//   for (int k = 1; k < real_fft_plan->size / 2; k++) {
+//     float mag = sqrt(pow(real_fft_plan->output[2*k], 2) + pow(real_fft_plan->output[2*k+1], 2));
+//     float freq = (k * SAMPLE_RATE) / FFT_N;
+//     if (mag > max_magnitude) { max_magnitude = mag; fundamental_freq = freq; }
+//   }
+
+//   fft_return[0] = fundamental_freq;
+//   fft_return[1] = max_magnitude;
+//   fft_destroy(real_fft_plan);
+// }
+// Replace your old processFFT with this:
+void processFFT(fft_config_t *plan, float fft_return[2]) {
+  
+  // 1. Execute using the pre-existing plan
+  fft_execute(plan);
 
   float max_magnitude = 0;
   float fundamental_freq = 0;
-  for (int k = 1; k < real_fft_plan->size / 2; k++) {
-    float mag = sqrt(pow(real_fft_plan->output[2*k], 2) + pow(real_fft_plan->output[2*k+1], 2));
+  
+  // 2. Calculate magnitudes using plan->size and plan->output
+  for (int k = 1; k < plan->size / 2; k++) {
+    float mag = sqrt(pow(plan->output[2*k], 2) + pow(plan->output[2*k+1], 2));
     float freq = (k * SAMPLE_RATE) / FFT_N;
-    if (mag > max_magnitude) { max_magnitude = mag; fundamental_freq = freq; }
+    if (mag > max_magnitude) { 
+      max_magnitude = mag; 
+      fundamental_freq = freq;
+    }
   }
 
+  // 3. Return results
   fft_return[0] = fundamental_freq;
   fft_return[1] = max_magnitude;
-  fft_destroy(real_fft_plan);
+  
+  // Notice there is NO fft_destroy() here!
 }
 
 /////////////////// System hit processes ///////////////////
 
+void pixieSequenceTask(void *pvParameters) {
+  Serial.println("=== Pixie START ===");
+  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
+
+  // 1. Sweep Out
+  // for (int p = INITIAL_POSITION; p <= FINAL_POSITION; p += 4) {
+  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p); 
+  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); // Non-blocking delay
+  // }
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, FINAL_POSITION);
+
+  // 2. Wait for the cooldown/hit process time
+  // This replaces your hitProcessTimer entirely!
+  vTaskDelay(pdMS_TO_TICKS(HIT_PROCESS_TIMER));
+
+  // 3. Sweep Back (Reset)
+  Serial.println("Starting pixie reset");
+  // for (int p = FINAL_POSITION; p >= INITIAL_POSITION; p -= 4) {
+  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p);
+  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); 
+  // }
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, INITIAL_POSITION);
+  vTaskDelay(pdMS_TO_TICKS(500));
+
+  // 4. Cleanup
+  digitalWrite(PIXIE_HIT_LED, HIGH); // Turn LEDs on
+  hit_state = WAITING;
+  Serial.println("Pixie has been reset");
+
+  pixieTaskHandle = NULL;
+  vTaskDelete(NULL); // Task cleans itself up
+}
+
+// void process_pixie() {
+
+//   // Play other song
+//   // myDFPlayer.advertise(1);
+
+//   // Turn on hit
+//   digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
+
+//   // Run servo
+//   for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 4) {  // goes from 0 degrees to 180 degrees
+//     // in steps of 1 degree
+//     // myservo.write(pos);  // tell servo to go to position in variable 'pos'
+//     setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
+//     delay(MOVE_DELAY);           // waits 15ms for the servo to reach the position
+//   }
+
+//   // Timer that adds delay before another hit start
+//   hitProcessTimer_start();
+// }
 void process_pixie() {
-
-  // Play other song
-  myDFPlayer.advertise(1);
-
-  // Turn on hit
-  digitalWrite(PIXIE_HIT_LED, HIGH); // Turn the pixie LEDs on
-
-  // Run servo
-  for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 1) {  // goes from 0 degrees to 180 degrees
-    // in steps of 1 degree
-    myservo.write(pos);  // tell servo to go to position in variable 'pos'
-    delay(MOVE_DELAY);           // waits 15ms for the servo to reach the position
-  }
-
-  // Timer that adds delay before another hit start
-  hitProcessTimer_start();
+  if (pixieTaskHandle != NULL) return; // Prevent triggering again if already running
+  
+  hit_state = PROCESSING;
+  
+  xTaskCreate(
+    pixieSequenceTask,    // Task function
+    "PixieTask",          // Name
+    2048,                 // Stack size
+    NULL,                 // Parameters
+    1,                    // Priority
+    &pixieTaskHandle      // Handle out
+  );
 }
 
 // Spawn the FreeRTOS task that runs the animation sequence.
@@ -317,6 +399,7 @@ void process_leviosa() {
 }
 
 void process_lumos() {
+  Serial.println("Processing Lumos");
   digitalWrite(LUMOS_MOSFET_CONTROL_PIN, HIGH);
   lumosProcessTimer_start();
 }
@@ -425,7 +508,30 @@ void lumosProcessTimer_start(void) {
   }
 }
 
+void setServoAngle(int pin, int angle) {
+  // Map 0-180 degrees to pulse widths (500us to 2400us)
+  // At 50Hz (20ms period) and 12-bit (4096 steps):
+  // 500us = (0.5ms / 20ms) * 4096 = 102
+  // 2400us = (2.4ms / 20ms) * 4096 = 491
+  int duty = map(angle, 0, 180, 102, 491);
+  ledcWrite(pin, duty);
+}
 
+void pixieBootSweep() {
+  Serial.println("Performing Pixie boot sweep...");
+  
+  // Start at the extended position
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, FINAL_POSITION);
+  delay(500); // Give it half a second to reach the start point
+
+  // Sweep smoothly back to the resting position
+  for (int p = FINAL_POSITION; p >= INITIAL_POSITION; p -= 4) {
+    setServoAngle(PIXIE_SERVO_CONTROL_PIN, p);
+    delay(MOVE_DELAY); 
+  }
+  
+  Serial.println("Pixie is in position and ready.");
+}
 
 // Initialization
 void setup() {
@@ -442,6 +548,9 @@ void setup() {
   motorStop();
   currentPosition = 0;
 
+  // Pixie Servo
+  ledcAttach(PIXIE_SERVO_CONTROL_PIN, 50, 12);
+
   // Encoder
   pinMode(ENCODER_A, INPUT_PULLUP);
   pinMode(ENCODER_B, INPUT_PULLUP);
@@ -456,40 +565,38 @@ void setup() {
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   delay(200);  // My preference for print stability
 
-  if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
-    Serial.println("ERROR");
-  }
+  // if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
+  //   Serial.println("ERROR");
+  // }
 
-  Serial.println();
-  Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
+  // Serial.println();
+  // Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
 
-  delay(1000);  // Add this to allow player to fully initialise
+  // delay(1000);  // Add this to allow player to fully initialise
   
-  myDFPlayer.volume(20);  //Set volume value. From 0 to 30
-  delay(500);
-  myDFPlayer.loop(1);
-  delay(500);
-  myDFPlayer.enableLoop();
+  // myDFPlayer.volume(20);  //Set volume value. From 0 to 30
+  // delay(500);
+  // myDFPlayer.loop(1);
+  // delay(500);
+  // myDFPlayer.enableLoop();
+
+  // Initialize FFT plans exactly once for each channel
+  pixie_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_pixie, fft_output);
+  lumos_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_lumos, fft_output_lumos);
 
   hitProcessTimer_init();
   leviosaProcessTimer_init();
   lumosProcessTimer_init();
-  
-  // Allow allocation of all timers
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
-  myservo.setPeriodHertz(50);           // standard 50 hz servo
-  myservo.attach(servoPin, 500, 2400);  // attaches the servo on pin 18 to the servo object
-                                        // using default min/max of 1000us and 2000us
-                                        // different servos may require different min/max settings
-                                        // for an accurate 0 to 180 sweep
 
-  digitalWrite(LED_PIN, LOW); // Turn the LED on
-  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the LED on
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(PIXIE_HIT_LED, LOW);
 
-  myservo.write(pos);  // Initialize to the standing position
+  // myservo.write(pos);  // Initialize to the standing position
+
+  // pixieResetRequested = true;/
+  // Serial.println("requested pixie reset");
+  pixieBootSweep();
+  digitalWrite(PIXIE_HIT_LED, HIGH);
 
   Serial.println("setup ended");  // I like this reassurance
 }
@@ -499,103 +606,104 @@ void loop() {
   unsigned long currentMicros = micros();
   unsigned long currentMicrosPot = micros();
 
-  // Pixie movement
-  if (pixieResetRequested) {
-    pixieResetRequested = false;
-
-    for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos--) {
-      myservo.write(pos);
-      delay(MOVE_DELAY);
-    }
-
-    myDFPlayer.enableLoop();
-    hit_state = WAITING;
-  }
-
-  // If it's time to take a sample
+  Serial.println("Taking a sample");
   if (currentMicros - previousMicros >= sampleInterval) {
-    previousMicros = currentMicros;
+    previousMicros += sampleInterval;
 
     // Read ADC value and store it in the buffer
-    fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);  // Replace with your ADC pin
-    
-    // Leviosa channel — read on the same tick (negligible overhead)
+    fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);
     fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
-
     fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
     
     sampleIndex_pixie++;
     sampleIndex_leviosa++;
     sampleIndex_lumos++;
 
-    // If the buffer is full, process the FFT
+    ////// PIXIE //////
     if (sampleIndex_pixie >= FFT_N) {
       float fft_return[2];
-      processFFT(fft_input_pixie, fft_output, fft_return);
+      // processFFT(fft_input_pixie, fft_output, fft_return);
+      processFFT(pixie_fft_plan, fft_return);
       sampleIndex_pixie = 0;  // Reset the sample index for the next batch
       float fundamental_freq = fft_return[0];
       float max_magnitude = fft_return[1];
-
-      if (fundamental_freq >= (TARGET_FREQ * 0.9) && fundamental_freq <= (TARGET_FREQ * 1.1) && (max_magnitude >= threshold) && (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
+      
+      Serial.print("pixie freq: ");
+      Serial.println(fundamental_freq);
+      Serial.print("pixie mag: ");
+      Serial.println(max_magnitude);
+      if (fundamental_freq >= (TARGET_FREQ * LOW_THRESHOLD) && 
+          fundamental_freq <= (TARGET_FREQ * HIGH_THRESHOLD) && 
+          (max_magnitude >= threshold) && 
+          (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
         Serial.println("Hit detected!\n");
         process_pixie();  // Process hit
       }
+    }
 
-      
+    ////// LEVIOSA //////
+    if (sampleIndex_leviosa >= FFT_N) {
+      float fft_return_lev[2];
+      // processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
+      processFFT(leviosa_fft_plan, fft_return_lev);
+      sampleIndex_leviosa = 0;
+
+      float freq_lev = fft_return_lev[0];
+      float mag_lev  = fft_return_lev[1];
+
+      // --- Leviosa hit detection ---
+      if (freq_lev   >= (TARGET_FREQ * LOW_THRESHOLD) &&
+          freq_lev   <= (TARGET_FREQ * HIGH_THRESHOLD) &&
+          mag_lev    >= threshold &&
+          leviosa_state == WAITING) {
+        Serial.println("Leviosa hit detected!");
+        process_leviosa();   // spawns FreeRTOS task — non-blocking
       }
+    }
 
-      if (sampleIndex_leviosa >= FFT_N) {
-        float fft_return_lev[2];
-        processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
-        sampleIndex_leviosa = 0;
-
-        float freq_lev = fft_return_lev[0];
-        float mag_lev  = fft_return_lev[1];
-
-        // --- Leviosa hit detection ---
-        if (freq_lev   >= (TARGET_FREQ * 0.9) &&
-            freq_lev   <= (TARGET_FREQ * 1.1) &&
-            mag_lev    >= threshold &&
-            leviosa_state == WAITING) {
-          Serial.println("Leviosa hit detected!");
-          process_leviosa();   // spawns FreeRTOS task — non-blocking
-        }
-      }
-
+    ////// LUMOS //////
     if (sampleIndex_lumos >= FFT_N) {
+      // Serial.println("Starting lumos detect");
       float fft_return_lumos[2];
-      processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+      // processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+      processFFT(lumos_fft_plan, fft_return_lumos);
       sampleIndex_lumos = 0;
 
       float freq_lumos = fft_return_lumos[0];
       float mag_lumos  = fft_return_lumos[1];
 
+      // Serial.print("lumos freq: ");
+      // Serial.println(freq_lumos);
+      // Serial.print("lumos mag: ");
+      // Serial.println(mag_lumos);
+
       // --- Lumos hit detection ---
-      if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
-          freq_lumos   <= (TARGET_FREQ * 1.1) &&
+      if (freq_lumos   >= (TARGET_FREQ * LOW_THRESHOLD) &&
+          freq_lumos   <= (TARGET_FREQ * HIGH_THRESHOLD) &&
           mag_lumos    >= threshold &&
           lumos_state == WAITING) {
           Serial.println("Lumos hit detected!");
           process_lumos();
         }
+      // Serial.println("Ending lumos detect");
     }
 
     // Check potentiometer values (100Hz Check)
-    if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
-      previousMicrosPot = currentMicrosPot;
+    // if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
+    //   previousMicrosPot = currentMicrosPot;
 
-      // if (checkCycle % 2 == 0) {  // Alternate between checks
-      int volume_adc = analogRead(VOLUME_PIN);
-      int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
-      myDFPlayer.volume(volume_val);
+    //   // if (checkCycle % 2 == 0) {  // Alternate between checks
+    //   int volume_adc = analogRead(VOLUME_PIN);
+    //   int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
+    //   myDFPlayer.volume(volume_val);
 
-      int state = myDFPlayer.readState(); // Get the playback state
+    //   int state = myDFPlayer.readState(); // Get the playback state
 
-      if (state == 2) { // 0 means the player is in the stopped state
-        delay(500); // Wait to send another command
-        digitalWrite(LED_PIN, HIGH); // Turn the LED on
-        myDFPlayer.loop(1); // Replay or loop the desired file
-      }
-    }
+    //   if (state == 2) { // 0 means the player is in the stopped state
+    //     delay(500); // Wait to send another command
+    //     digitalWrite(LED_PIN, HIGH); // Turn the LED on
+    //     myDFPlayer.loop(1); // Replay or loop the desired file
+    //   }
+    // }
   }
 }
