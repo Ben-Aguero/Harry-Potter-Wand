@@ -28,8 +28,8 @@
 #define ADC_PIN_PIXIE 15      // Pin for Pixie detection ADC
 #define PIXIE_HIT_LED 12            // Pin for Pixie LEDs
 #define PIXIE_SERVO_CONTROL_PIN 13    // Pin for Pixie servo control
-#define INITIAL_POSITION 85   // Starting position for pixie servo in degrees
-#define FINAL_POSITION 175    // Hit position for pixie servo in degrees
+#define INITIAL_POSITION 90   // Starting position for pixie servo in degrees
+#define FINAL_POSITION 180    // Hit position for pixie servo in degrees
 
 ///////////////////// Leviosa /////////////////////
 #define ADC_PIN_LEVIOSA 2  // Second wand ADC for leviosa detection (adjust as needed)
@@ -284,15 +284,16 @@ void processFFT(float* input, float* output, float fft_return[2]) {
 void process_pixie() {
 
   // Play other song
-  myDFPlayer.advertise(1);
+  // myDFPlayer.advertise(1);
 
   // Turn on hit
-  digitalWrite(PIXIE_HIT_LED, HIGH); // Turn the pixie LEDs on
+  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
 
   // Run servo
-  for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 1) {  // goes from 0 degrees to 180 degrees
+  for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 4) {  // goes from 0 degrees to 180 degrees
     // in steps of 1 degree
-    myservo.write(pos);  // tell servo to go to position in variable 'pos'
+    // myservo.write(pos);  // tell servo to go to position in variable 'pos'
+    setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
     delay(MOVE_DELAY);           // waits 15ms for the servo to reach the position
   }
 
@@ -317,6 +318,7 @@ void process_leviosa() {
 }
 
 void process_lumos() {
+  Serial.println("Processing Lumos");
   digitalWrite(LUMOS_MOSFET_CONTROL_PIN, HIGH);
   lumosProcessTimer_start();
 }
@@ -425,7 +427,14 @@ void lumosProcessTimer_start(void) {
   }
 }
 
-
+void setServoAngle(int pin, int angle) {
+  // Map 0-180 degrees to pulse widths (500us to 2400us)
+  // At 50Hz (20ms period) and 12-bit (4096 steps):
+  // 500us = (0.5ms / 20ms) * 4096 = 102
+  // 2400us = (2.4ms / 20ms) * 4096 = 491
+  int duty = map(angle, 0, 180, 102, 491);
+  ledcWrite(pin, duty);
+}
 
 // Initialization
 void setup() {
@@ -442,6 +451,18 @@ void setup() {
   motorStop();
   currentPosition = 0;
 
+  // Pixie Servo
+  ESP32PWM::allocateTimer(0);
+  // ESP32PWM::allocateTimer(1);
+  // ESP32PWM::allocateTimer(2);
+  // ESP32PWM::allocateTimer(3);
+  // myservo.setPeriodHertz(50);           // standard 50 hz servo
+  // myservo.attach(servoPin, 500, 2400);  // attaches the servo on pin 18 to the servo object
+  //                                       // using default min/max of 1000us and 2000us
+  //                                       // different servos may require different min/max settings
+  //                                       // for an accurate 0 to 180 sweep
+  ledcAttach(PIXIE_SERVO_CONTROL_PIN, 50, 12);
+
   // Encoder
   pinMode(ENCODER_A, INPUT_PULLUP);
   pinMode(ENCODER_B, INPUT_PULLUP);
@@ -456,62 +477,64 @@ void setup() {
   Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   delay(200);  // My preference for print stability
 
-  if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
-    Serial.println("ERROR");
-  }
+  // if (!myDFPlayer.begin(Serial2, false)) {  // Start communication with DFPlayer, disable ack
+  //   Serial.println("ERROR");
+  // }
 
-  Serial.println();
-  Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
+  // Serial.println();
+  // Serial.println(F("Initializing DFPlayer ... (May take 3~5 seconds)"));
 
-  delay(1000);  // Add this to allow player to fully initialise
+  // delay(1000);  // Add this to allow player to fully initialise
   
-  myDFPlayer.volume(20);  //Set volume value. From 0 to 30
-  delay(500);
-  myDFPlayer.loop(1);
-  delay(500);
-  myDFPlayer.enableLoop();
+  // myDFPlayer.volume(20);  //Set volume value. From 0 to 30
+  // delay(500);
+  // myDFPlayer.loop(1);
+  // delay(500);
+  // myDFPlayer.enableLoop();
 
   hitProcessTimer_init();
-  leviosaProcessTimer_init();
-  lumosProcessTimer_init();
-  
-  // Allow allocation of all timers
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
-  myservo.setPeriodHertz(50);           // standard 50 hz servo
-  myservo.attach(servoPin, 500, 2400);  // attaches the servo on pin 18 to the servo object
-                                        // using default min/max of 1000us and 2000us
-                                        // different servos may require different min/max settings
-                                        // for an accurate 0 to 180 sweep
+  // leviosaProcessTimer_init();
+  // lumosProcessTimer_init();
 
-  digitalWrite(LED_PIN, LOW); // Turn the LED on
-  digitalWrite(PIXIE_HIT_LED, LOW); // Turn the LED on
+  digitalWrite(LED_PIN, LOW);
+  digitalWrite(PIXIE_HIT_LED, LOW);
 
   myservo.write(pos);  // Initialize to the standing position
 
   Serial.println("setup ended");  // I like this reassurance
+  pixieResetRequested = true;
+  Serial.println("requested pixie reset");
 }
 
 // Main Loop
 void loop() {
+  // Serial.println("calling micros()");
   unsigned long currentMicros = micros();
+  // Serial.println("calling micros() again");
   unsigned long currentMicrosPot = micros();
 
   // Pixie movement
   if (pixieResetRequested) {
+    Serial.println("Starting pixie reset");
     pixieResetRequested = false;
-
-    for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos--) {
-      myservo.write(pos);
+    for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos-=4) {
+      // Serial.print("Writing servo to ");
+      // Serial.println(pos);
+      // myservo.write(pos);
+      setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
+      // Serial.print("Wrote servo to ");
+      // Serial.println(pos);
       delay(MOVE_DELAY);
+      // Serial.println("Move delay complete");
     }
 
-    myDFPlayer.enableLoop();
+    // myDFPlayer.enableLoop();
     hit_state = WAITING;
+    digitalWrite(PIXIE_HIT_LED, HIGH);
+    Serial.println("Pixie has been reset");
   }
 
+  // Serial.println("Taking a sample");
   // If it's time to take a sample
   if (currentMicros - previousMicros >= sampleInterval) {
     previousMicros = currentMicros;
@@ -520,9 +543,9 @@ void loop() {
     fft_input_pixie[sampleIndex_pixie] = analogRead(ADC_PIN_PIXIE);  // Replace with your ADC pin
     
     // Leviosa channel — read on the same tick (negligible overhead)
-    fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
+    // fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
 
-    fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
+    // fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
     
     sampleIndex_pixie++;
     sampleIndex_leviosa++;
@@ -542,60 +565,63 @@ void loop() {
       }
 
       
-      }
-
-      if (sampleIndex_leviosa >= FFT_N) {
-        float fft_return_lev[2];
-        processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
-        sampleIndex_leviosa = 0;
-
-        float freq_lev = fft_return_lev[0];
-        float mag_lev  = fft_return_lev[1];
-
-        // --- Leviosa hit detection ---
-        if (freq_lev   >= (TARGET_FREQ * 0.9) &&
-            freq_lev   <= (TARGET_FREQ * 1.1) &&
-            mag_lev    >= threshold &&
-            leviosa_state == WAITING) {
-          Serial.println("Leviosa hit detected!");
-          process_leviosa();   // spawns FreeRTOS task — non-blocking
-        }
-      }
-
-    if (sampleIndex_lumos >= FFT_N) {
-      float fft_return_lumos[2];
-      processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
-      sampleIndex_lumos = 0;
-
-      float freq_lumos = fft_return_lumos[0];
-      float mag_lumos  = fft_return_lumos[1];
-
-      // --- Lumos hit detection ---
-      if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
-          freq_lumos   <= (TARGET_FREQ * 1.1) &&
-          mag_lumos    >= threshold &&
-          lumos_state == WAITING) {
-          Serial.println("Lumos hit detected!");
-          process_lumos();
-        }
     }
+
+      // if (sampleIndex_leviosa >= FFT_N) {
+      //   float fft_return_lev[2];
+      //   processFFT(fft_input_leviosa, fft_output_leviosa, fft_return_lev);
+      //   sampleIndex_leviosa = 0;
+
+      //   float freq_lev = fft_return_lev[0];
+      //   float mag_lev  = fft_return_lev[1];
+
+      //   // --- Leviosa hit detection ---
+      //   if (freq_lev   >= (TARGET_FREQ * 0.9) &&
+      //       freq_lev   <= (TARGET_FREQ * 1.1) &&
+      //       mag_lev    >= threshold &&
+      //       leviosa_state == WAITING) {
+      //     Serial.println("Leviosa hit detected!");
+      //     process_leviosa();   // spawns FreeRTOS task — non-blocking
+      //   }
+      // }
+
+    ////// LUMOS //////
+    // if (sampleIndex_lumos >= FFT_N) {
+    //   // Serial.println("Starting lumos detect");
+    //   float fft_return_lumos[2];
+    //   processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+    //   sampleIndex_lumos = 0;
+
+    //   float freq_lumos = fft_return_lumos[0];
+    //   float mag_lumos  = fft_return_lumos[1];
+
+    //   // --- Lumos hit detection ---
+    //   if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
+    //       freq_lumos   <= (TARGET_FREQ * 1.1) &&
+    //       mag_lumos    >= threshold &&
+    //       lumos_state == WAITING) {
+    //       Serial.println("Lumos hit detected!");
+    //       process_lumos();
+    //     }
+    //   // Serial.println("Ending lumos detect");
+    // }
 
     // Check potentiometer values (100Hz Check)
-    if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
-      previousMicrosPot = currentMicrosPot;
+    // if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
+    //   previousMicrosPot = currentMicrosPot;
 
-      // if (checkCycle % 2 == 0) {  // Alternate between checks
-      int volume_adc = analogRead(VOLUME_PIN);
-      int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
-      myDFPlayer.volume(volume_val);
+    //   // if (checkCycle % 2 == 0) {  // Alternate between checks
+    //   int volume_adc = analogRead(VOLUME_PIN);
+    //   int volume_val = map(volume_adc, 0, MAX_ADC, 0, MAX_VOLUME);
+    //   myDFPlayer.volume(volume_val);
 
-      int state = myDFPlayer.readState(); // Get the playback state
+    //   int state = myDFPlayer.readState(); // Get the playback state
 
-      if (state == 2) { // 0 means the player is in the stopped state
-        delay(500); // Wait to send another command
-        digitalWrite(LED_PIN, HIGH); // Turn the LED on
-        myDFPlayer.loop(1); // Replay or loop the desired file
-      }
-    }
+    //   if (state == 2) { // 0 means the player is in the stopped state
+    //     delay(500); // Wait to send another command
+    //     digitalWrite(LED_PIN, HIGH); // Turn the LED on
+    //     myDFPlayer.loop(1); // Replay or loop the desired file
+    //   }
+    // }
   }
 }
