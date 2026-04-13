@@ -7,7 +7,7 @@
 
 
 
-#define SAMPLE_RATE 10000       // Sample rate in Hz (50 kHz)
+#define SAMPLE_RATE 8500       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
 #define FFT_N 1024              // FFT Size
 #define TARGET_FREQ 4000.0      // Frequency of wand signal
@@ -43,7 +43,7 @@
 #define LEVIOSA_COOLDOWN_MS 5000
 
 ///////////////////// Lumos /////////////////////
-#define ADC_PIN_LUMOS 0
+#define ADC_PIN_LUMOS 36
 #define LUMOS_MOSFET_CONTROL_PIN 18
 
 
@@ -269,25 +269,40 @@ void leviosaSequenceTask(void *pvParameters) {
   vTaskDelete(NULL);  // task cleans itself up
 }
 
+// void leviosaSequenceTask(void *pvParameters) {
+//   Serial.println("=== Leviosa START ===");
+
+//   // TODO: digitalWrite(LEVIOSA_LED_PIN, HIGH);  // turn on levitation LED
+
+//   // Rise and hang
+//   // moveAndHold(190, 300, false, 6000);
+//   motorDrive(1, 65); // 65 and 155
+
+
+//   // // Bob twice
+//   // for (int i = 0; i < 2; i++) {
+//   //   glideToPosition(100, 800);
+//   //   glideToPosition(170, 800);
+//   // }
+
+//   // Smooth descent back to rest
+//   // glideToPosition(0, 3000);
+//   motorStop();
+
+//   // TODO: digitalWrite(LEVIOSA_LED_PIN, LOW);   // turn off levitation LED
+
+//   Serial.println("=== Leviosa COMPLETE — starting cooldown ===");
+
+//   // Start the cooldown timer so leviosa_state returns to WAITING after the
+//   // configured delay (prevents immediate re-trigger).
+//   leviosaProcessTimer_start();   // forward-declared below
+
+//   leviosaTaskHandle = NULL;
+//   vTaskDelete(NULL);  // task cleans itself up
+// }
+
 
 // Function to process the FFT on the collected samples
-// void processFFT(float* input, float* output, float fft_return[2]) {
-//   fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, input, output);
-//   fft_execute(real_fft_plan);
-
-//   float max_magnitude = 0;
-//   float fundamental_freq = 0;
-//   for (int k = 1; k < real_fft_plan->size / 2; k++) {
-//     float mag = sqrt(pow(real_fft_plan->output[2*k], 2) + pow(real_fft_plan->output[2*k+1], 2));
-//     float freq = (k * SAMPLE_RATE) / FFT_N;
-//     if (mag > max_magnitude) { max_magnitude = mag; fundamental_freq = freq; }
-//   }
-
-//   fft_return[0] = fundamental_freq;
-//   fft_return[1] = max_magnitude;
-//   fft_destroy(real_fft_plan);
-// }
-// Replace your old processFFT with this:
 void processFFT(fft_config_t *plan, float fft_return[2]) {
   
   // 1. Execute using the pre-existing plan
@@ -309,8 +324,6 @@ void processFFT(fft_config_t *plan, float fft_return[2]) {
   // 3. Return results
   fft_return[0] = fundamental_freq;
   fft_return[1] = max_magnitude;
-  
-  // Notice there is NO fft_destroy() here!
 }
 
 /////////////////// System hit processes ///////////////////
@@ -320,22 +333,13 @@ void pixieSequenceTask(void *pvParameters) {
   digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
 
   // 1. Sweep Out
-  // for (int p = INITIAL_POSITION; p <= FINAL_POSITION; p += 4) {
-  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p); 
-  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); // Non-blocking delay
-  // }
   setServoAngle(PIXIE_SERVO_CONTROL_PIN, FINAL_POSITION);
 
   // 2. Wait for the cooldown/hit process time
-  // This replaces your hitProcessTimer entirely!
   vTaskDelay(pdMS_TO_TICKS(HIT_PROCESS_TIMER));
 
   // 3. Sweep Back (Reset)
   Serial.println("Starting pixie reset");
-  // for (int p = FINAL_POSITION; p >= INITIAL_POSITION; p -= 4) {
-  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p);
-  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); 
-  // }
   setServoAngle(PIXIE_SERVO_CONTROL_PIN, INITIAL_POSITION);
   vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -582,6 +586,7 @@ void setup() {
 
   // Initialize FFT plans exactly once for each channel
   pixie_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_pixie, fft_output);
+  leviosa_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_leviosa, fft_output_leviosa);
   lumos_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_lumos, fft_output_lumos);
 
   hitProcessTimer_init();
@@ -606,7 +611,7 @@ void loop() {
   unsigned long currentMicros = micros();
   unsigned long currentMicrosPot = micros();
 
-  Serial.println("Taking a sample");
+  // Serial.println("Taking a sample");
   if (currentMicros - previousMicros >= sampleInterval) {
     previousMicros += sampleInterval;
 
@@ -628,10 +633,10 @@ void loop() {
       float fundamental_freq = fft_return[0];
       float max_magnitude = fft_return[1];
       
-      Serial.print("pixie freq: ");
-      Serial.println(fundamental_freq);
-      Serial.print("pixie mag: ");
-      Serial.println(max_magnitude);
+      // Serial.print("pixie freq: ");
+      // Serial.println(fundamental_freq);
+      // Serial.print("pixie mag: ");
+      // Serial.println(max_magnitude);
       if (fundamental_freq >= (TARGET_FREQ * LOW_THRESHOLD) && 
           fundamental_freq <= (TARGET_FREQ * HIGH_THRESHOLD) && 
           (max_magnitude >= threshold) && 
