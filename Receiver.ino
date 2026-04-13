@@ -10,7 +10,7 @@
 #define SAMPLE_RATE 16000       // Sample rate in Hz (50 kHz)
 #define CHECK_RATE 1          // Sample rate in Hz (50 kHz)
 #define FFT_N 1024              // FFT Size
-#define TARGET_FREQ 4000.0      // Frequency of wand signal
+#define TARGET_FREQ 5000.0      // Frequency of wand signal
 #define HIT_PROCESS_TIMER 5000  // Time before another hit can be detected after hit
 #define LUMOS_PROCESS_TIMER 5000 // Time before an additional lumos hit can be processed
 #define LED_PIN 14            // Debugging LED
@@ -53,6 +53,9 @@ DFRobotDFPlayerMini myDFPlayer; // Initialize the DFPlayer object
 #define RXD2 5
 #define TXD2 4
 
+#define LOW_THRESHOLD 0.9
+#define HIGH_THRESHOLD 1.1
+
 void leviosaProcessTimer_start(void);
 
 // Pixie control variable
@@ -90,6 +93,8 @@ const int DEADBAND     = 5;
 volatile long          currentPosition = 0;
 volatile unsigned long lastISRTime     = 0;
 
+// (Do the same for Leviosa when you uncomment it)
+
 void IRAM_ATTR encoderISR() {
   unsigned long now = micros();
   if (now - lastISRTime > 500) {
@@ -99,21 +104,24 @@ void IRAM_ATTR encoderISR() {
 }
 
 // Pixie FFT buffers
-float fft_input_pixie[FFT_N];   // ADC sample buffer
-float fft_output[FFT_N];  // FFT output buffer
+float fft_input_pixie[FFT_N];   
+float fft_output[FFT_N];
 int sampleIndex_pixie = 0;
 static TaskHandle_t pixieTaskHandle = NULL;
+fft_config_t *pixie_fft_plan = NULL;
+
+// Lumos FFT buffers
+float fft_input_lumos[FFT_N];
+float fft_output_lumos[FFT_N];
+int sampleIndex_lumos = 0;
+fft_config_t *lumos_fft_plan = NULL;
 
 // Leviosa FFT buffers (separate channel)
 float fft_input_leviosa[FFT_N];
 float fft_output_leviosa[FFT_N];
 int sampleIndex_leviosa = 0;
 static TaskHandle_t leviosaTaskHandle = NULL;
-
-// Lumos FFT buffers
-float fft_input_lumos[FFT_N];
-float fft_output_lumos[FFT_N];
-int sampleIndex_lumos = 0;
+fft_config_t *leviosa_fft_plan = NULL;
 
 // Motor helpers
 void motorStop() {
@@ -263,21 +271,46 @@ void leviosaSequenceTask(void *pvParameters) {
 
 
 // Function to process the FFT on the collected samples
-void processFFT(float* input, float* output, float fft_return[2]) {
-  fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, input, output);
-  fft_execute(real_fft_plan);
+// void processFFT(float* input, float* output, float fft_return[2]) {
+//   fft_config_t *real_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, input, output);
+//   fft_execute(real_fft_plan);
+
+//   float max_magnitude = 0;
+//   float fundamental_freq = 0;
+//   for (int k = 1; k < real_fft_plan->size / 2; k++) {
+//     float mag = sqrt(pow(real_fft_plan->output[2*k], 2) + pow(real_fft_plan->output[2*k+1], 2));
+//     float freq = (k * SAMPLE_RATE) / FFT_N;
+//     if (mag > max_magnitude) { max_magnitude = mag; fundamental_freq = freq; }
+//   }
+
+//   fft_return[0] = fundamental_freq;
+//   fft_return[1] = max_magnitude;
+//   fft_destroy(real_fft_plan);
+// }
+// Replace your old processFFT with this:
+void processFFT(fft_config_t *plan, float fft_return[2]) {
+  
+  // 1. Execute using the pre-existing plan
+  fft_execute(plan);
 
   float max_magnitude = 0;
   float fundamental_freq = 0;
-  for (int k = 1; k < real_fft_plan->size / 2; k++) {
-    float mag = sqrt(pow(real_fft_plan->output[2*k], 2) + pow(real_fft_plan->output[2*k+1], 2));
+  
+  // 2. Calculate magnitudes using plan->size and plan->output
+  for (int k = 1; k < plan->size / 2; k++) {
+    float mag = sqrt(pow(plan->output[2*k], 2) + pow(plan->output[2*k+1], 2));
     float freq = (k * SAMPLE_RATE) / FFT_N;
-    if (mag > max_magnitude) { max_magnitude = mag; fundamental_freq = freq; }
+    if (mag > max_magnitude) { 
+      max_magnitude = mag; 
+      fundamental_freq = freq;
+    }
   }
 
+  // 3. Return results
   fft_return[0] = fundamental_freq;
   fft_return[1] = max_magnitude;
-  fft_destroy(real_fft_plan);
+  
+  // Notice there is NO fft_destroy() here!
 }
 
 /////////////////// System hit processes ///////////////////
@@ -304,7 +337,7 @@ void pixieSequenceTask(void *pvParameters) {
   //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); 
   // }
   setServoAngle(PIXIE_SERVO_CONTROL_PIN, INITIAL_POSITION);
-  vTaskDelay(500);
+  vTaskDelay(pdMS_TO_TICKS(500));
 
   // 4. Cleanup
   digitalWrite(PIXIE_HIT_LED, HIGH); // Turn LEDs on
@@ -556,6 +589,10 @@ void setup() {
   // delay(500);
   // myDFPlayer.enableLoop();
 
+  // Initialize FFT plans exactly once for each channel
+  pixie_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_pixie, fft_output);
+  lumos_fft_plan = fft_init(FFT_N, FFT_REAL, FFT_FORWARD, fft_input_lumos, fft_output_lumos);
+
   hitProcessTimer_init();
   // leviosaProcessTimer_init();
   lumosProcessTimer_init();
@@ -565,11 +602,12 @@ void setup() {
 
   // myservo.write(pos);  // Initialize to the standing position
 
-  Serial.println("setup ended");  // I like this reassurance
   // pixieResetRequested = true;/
   // Serial.println("requested pixie reset");
   pixieBootSweep();
   digitalWrite(PIXIE_HIT_LED, HIGH);
+
+  Serial.println("setup ended");  // I like this reassurance
 }
 
 // Main Loop
@@ -620,12 +658,20 @@ void loop() {
     // If the buffer is full, process the FFT
     if (sampleIndex_pixie >= FFT_N) {
       float fft_return[2];
-      processFFT(fft_input_pixie, fft_output, fft_return);
+      // processFFT(fft_input_pixie, fft_output, fft_return);
+      processFFT(pixie_fft_plan, fft_return);
       sampleIndex_pixie = 0;  // Reset the sample index for the next batch
       float fundamental_freq = fft_return[0];
       float max_magnitude = fft_return[1];
-
-      if (fundamental_freq >= (TARGET_FREQ * 0.9) && fundamental_freq <= (TARGET_FREQ * 1.1) && (max_magnitude >= threshold) && (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
+      
+      // Serial.print("pixie freq: ");
+      // Serial.println(fundamental_freq);
+      // Serial.print("pixie mag: ");
+      // Serial.println(max_magnitude);
+      if (fundamental_freq >= (TARGET_FREQ * LOW_THRESHOLD) && 
+          fundamental_freq <= (TARGET_FREQ * HIGH_THRESHOLD) && 
+          (max_magnitude >= threshold) && 
+          (hit_state == WAITING)) {  // Right freq, magnitude, and not too soon after last hit
         Serial.println("Hit detected!\n");
         process_pixie();  // Process hit
       }
@@ -642,8 +688,8 @@ void loop() {
       //   float mag_lev  = fft_return_lev[1];
 
       //   // --- Leviosa hit detection ---
-      //   if (freq_lev   >= (TARGET_FREQ * 0.9) &&
-      //       freq_lev   <= (TARGET_FREQ * 1.1) &&
+      //   if (freq_lev   >= (TARGET_FREQ * LOW_THRESHOLD) &&
+      //       freq_lev   <= (TARGET_FREQ * HIGH_THRESHOLD) &&
       //       mag_lev    >= threshold &&
       //       leviosa_state == WAITING) {
       //     Serial.println("Leviosa hit detected!");
@@ -655,15 +701,21 @@ void loop() {
     if (sampleIndex_lumos >= FFT_N) {
       // Serial.println("Starting lumos detect");
       float fft_return_lumos[2];
-      processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+      // processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+      processFFT(lumos_fft_plan, fft_return_lumos);
       sampleIndex_lumos = 0;
 
       float freq_lumos = fft_return_lumos[0];
       float mag_lumos  = fft_return_lumos[1];
 
+      // Serial.print("lumos freq: ");
+      // Serial.println(freq_lumos);
+      // Serial.print("lumos mag: ");
+      // Serial.println(mag_lumos);
+
       // --- Lumos hit detection ---
-      if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
-          freq_lumos   <= (TARGET_FREQ * 1.1) &&
+      if (freq_lumos   >= (TARGET_FREQ * LOW_THRESHOLD) &&
+          freq_lumos   <= (TARGET_FREQ * HIGH_THRESHOLD) &&
           mag_lumos    >= threshold &&
           lumos_state == WAITING) {
           Serial.println("Lumos hit detected!");
