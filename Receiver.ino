@@ -2,7 +2,7 @@
 #include "DFRobotDFPlayerMini.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
-#include <ESP32Servo.h>
+// #include <ESP32Servo.h>
 #include <math.h>
 
 
@@ -71,7 +71,7 @@ hit_state_e hit_state = WAITING;
 hit_state_e leviosa_state = WAITING;
 hit_state_e lumos_state = WAITING;
 
-Servo myservo;  // create servo object to control a servo
+// Servo myservo;  // create servo object to control a servo
 int pos = INITIAL_POSITION;    // Servo location
 int servoPin = PIXIE_SERVO_CONTROL_PIN;
 
@@ -102,6 +102,7 @@ void IRAM_ATTR encoderISR() {
 float fft_input_pixie[FFT_N];   // ADC sample buffer
 float fft_output[FFT_N];  // FFT output buffer
 int sampleIndex_pixie = 0;
+static TaskHandle_t pixieTaskHandle = NULL;
 
 // Leviosa FFT buffers (separate channel)
 float fft_input_leviosa[FFT_N];
@@ -281,24 +282,71 @@ void processFFT(float* input, float* output, float fft_return[2]) {
 
 /////////////////// System hit processes ///////////////////
 
-void process_pixie() {
-
-  // Play other song
-  // myDFPlayer.advertise(1);
-
-  // Turn on hit
+void pixieSequenceTask(void *pvParameters) {
+  Serial.println("=== Pixie START ===");
   digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
 
-  // Run servo
-  for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 4) {  // goes from 0 degrees to 180 degrees
-    // in steps of 1 degree
-    // myservo.write(pos);  // tell servo to go to position in variable 'pos'
-    setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
-    delay(MOVE_DELAY);           // waits 15ms for the servo to reach the position
-  }
+  // 1. Sweep Out
+  // for (int p = INITIAL_POSITION; p <= FINAL_POSITION; p += 4) {
+  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p); 
+  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); // Non-blocking delay
+  // }
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, FINAL_POSITION);
 
-  // Timer that adds delay before another hit start
-  hitProcessTimer_start();
+  // 2. Wait for the cooldown/hit process time
+  // This replaces your hitProcessTimer entirely!
+  vTaskDelay(pdMS_TO_TICKS(HIT_PROCESS_TIMER));
+
+  // 3. Sweep Back (Reset)
+  Serial.println("Starting pixie reset");
+  // for (int p = FINAL_POSITION; p >= INITIAL_POSITION; p -= 4) {
+  //   setServoAngle(PIXIE_SERVO_CONTROL_PIN, p);
+  //   vTaskDelay(pdMS_TO_TICKS(MOVE_DELAY)); 
+  // }
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, INITIAL_POSITION);
+  vTaskDelay(500);
+
+  // 4. Cleanup
+  digitalWrite(PIXIE_HIT_LED, HIGH); // Turn LEDs on
+  hit_state = WAITING;
+  Serial.println("Pixie has been reset");
+
+  pixieTaskHandle = NULL;
+  vTaskDelete(NULL); // Task cleans itself up
+}
+
+// void process_pixie() {
+
+//   // Play other song
+//   // myDFPlayer.advertise(1);
+
+//   // Turn on hit
+//   digitalWrite(PIXIE_HIT_LED, LOW); // Turn the pixie LEDs off
+
+//   // Run servo
+//   for (int pos = INITIAL_POSITION; pos <= FINAL_POSITION; pos += 4) {  // goes from 0 degrees to 180 degrees
+//     // in steps of 1 degree
+//     // myservo.write(pos);  // tell servo to go to position in variable 'pos'
+//     setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
+//     delay(MOVE_DELAY);           // waits 15ms for the servo to reach the position
+//   }
+
+//   // Timer that adds delay before another hit start
+//   hitProcessTimer_start();
+// }
+void process_pixie() {
+  if (pixieTaskHandle != NULL) return; // Prevent triggering again if already running
+  
+  hit_state = PROCESSING;
+  
+  xTaskCreate(
+    pixieSequenceTask,    // Task function
+    "PixieTask",          // Name
+    2048,                 // Stack size
+    NULL,                 // Parameters
+    1,                    // Priority
+    &pixieTaskHandle      // Handle out
+  );
 }
 
 // Spawn the FreeRTOS task that runs the animation sequence.
@@ -436,6 +484,22 @@ void setServoAngle(int pin, int angle) {
   ledcWrite(pin, duty);
 }
 
+void pixieBootSweep() {
+  Serial.println("Performing Pixie boot sweep...");
+  
+  // Start at the extended position
+  setServoAngle(PIXIE_SERVO_CONTROL_PIN, FINAL_POSITION);
+  delay(500); // Give it half a second to reach the start point
+
+  // Sweep smoothly back to the resting position
+  for (int p = FINAL_POSITION; p >= INITIAL_POSITION; p -= 4) {
+    setServoAngle(PIXIE_SERVO_CONTROL_PIN, p);
+    delay(MOVE_DELAY); 
+  }
+  
+  Serial.println("Pixie is in position and ready.");
+}
+
 // Initialization
 void setup() {
   // Initialize LEDs
@@ -452,7 +516,7 @@ void setup() {
   currentPosition = 0;
 
   // Pixie Servo
-  ESP32PWM::allocateTimer(0);
+  // ESP32PWM::allocateTimer(0);
   // ESP32PWM::allocateTimer(1);
   // ESP32PWM::allocateTimer(2);
   // ESP32PWM::allocateTimer(3);
@@ -494,16 +558,18 @@ void setup() {
 
   hitProcessTimer_init();
   // leviosaProcessTimer_init();
-  // lumosProcessTimer_init();
+  lumosProcessTimer_init();
 
   digitalWrite(LED_PIN, LOW);
   digitalWrite(PIXIE_HIT_LED, LOW);
 
-  myservo.write(pos);  // Initialize to the standing position
+  // myservo.write(pos);  // Initialize to the standing position
 
   Serial.println("setup ended");  // I like this reassurance
-  pixieResetRequested = true;
-  Serial.println("requested pixie reset");
+  // pixieResetRequested = true;/
+  // Serial.println("requested pixie reset");
+  pixieBootSweep();
+  digitalWrite(PIXIE_HIT_LED, HIGH);
 }
 
 // Main Loop
@@ -514,25 +580,25 @@ void loop() {
   unsigned long currentMicrosPot = micros();
 
   // Pixie movement
-  if (pixieResetRequested) {
-    Serial.println("Starting pixie reset");
-    pixieResetRequested = false;
-    for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos-=4) {
-      // Serial.print("Writing servo to ");
-      // Serial.println(pos);
-      // myservo.write(pos);
-      setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
-      // Serial.print("Wrote servo to ");
-      // Serial.println(pos);
-      delay(MOVE_DELAY);
-      // Serial.println("Move delay complete");
-    }
+  // if (pixieResetRequested) {
+  //   Serial.println("Starting pixie reset");
+  //   pixieResetRequested = false;
+  //   for (pos = FINAL_POSITION; pos >= INITIAL_POSITION; pos-=4) {
+  //     // Serial.print("Writing servo to ");
+  //     // Serial.println(pos);
+  //     // myservo.write(pos);
+  //     setServoAngle(PIXIE_SERVO_CONTROL_PIN, pos);
+  //     // Serial.print("Wrote servo to ");
+  //     // Serial.println(pos);
+  //     delay(MOVE_DELAY);
+  //     // Serial.println("Move delay complete");
+  //   }
 
-    // myDFPlayer.enableLoop();
-    hit_state = WAITING;
-    digitalWrite(PIXIE_HIT_LED, HIGH);
-    Serial.println("Pixie has been reset");
-  }
+  //   // myDFPlayer.enableLoop();
+  //   hit_state = WAITING;
+  //   digitalWrite(PIXIE_HIT_LED, HIGH);
+  //   Serial.println("Pixie has been reset");
+  // }
 
   // Serial.println("Taking a sample");
   // If it's time to take a sample
@@ -545,7 +611,7 @@ void loop() {
     // Leviosa channel — read on the same tick (negligible overhead)
     // fft_input_leviosa[sampleIndex_leviosa] = analogRead(ADC_PIN_LEVIOSA);
 
-    // fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
+    fft_input_lumos[sampleIndex_lumos] = analogRead(ADC_PIN_LUMOS);
     
     sampleIndex_pixie++;
     sampleIndex_leviosa++;
@@ -586,25 +652,25 @@ void loop() {
       // }
 
     ////// LUMOS //////
-    // if (sampleIndex_lumos >= FFT_N) {
-    //   // Serial.println("Starting lumos detect");
-    //   float fft_return_lumos[2];
-    //   processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
-    //   sampleIndex_lumos = 0;
+    if (sampleIndex_lumos >= FFT_N) {
+      // Serial.println("Starting lumos detect");
+      float fft_return_lumos[2];
+      processFFT(fft_input_lumos, fft_output_lumos, fft_return_lumos);
+      sampleIndex_lumos = 0;
 
-    //   float freq_lumos = fft_return_lumos[0];
-    //   float mag_lumos  = fft_return_lumos[1];
+      float freq_lumos = fft_return_lumos[0];
+      float mag_lumos  = fft_return_lumos[1];
 
-    //   // --- Lumos hit detection ---
-    //   if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
-    //       freq_lumos   <= (TARGET_FREQ * 1.1) &&
-    //       mag_lumos    >= threshold &&
-    //       lumos_state == WAITING) {
-    //       Serial.println("Lumos hit detected!");
-    //       process_lumos();
-    //     }
-    //   // Serial.println("Ending lumos detect");
-    // }
+      // --- Lumos hit detection ---
+      if (freq_lumos   >= (TARGET_FREQ * 0.9) &&
+          freq_lumos   <= (TARGET_FREQ * 1.1) &&
+          mag_lumos    >= threshold &&
+          lumos_state == WAITING) {
+          Serial.println("Lumos hit detected!");
+          process_lumos();
+        }
+      // Serial.println("Ending lumos detect");
+    }
 
     // Check potentiometer values (100Hz Check)
     // if (currentMicrosPot - previousMicrosPot >= checkPotInterval) {
